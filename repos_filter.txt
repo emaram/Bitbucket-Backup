@@ -1,0 +1,16 @@
+# Filter which repositories to back up.
+# Lines starting with '#' and blank lines are ignored.
+# If this file is empty (or contains only comments), ALL repositories in the
+# workspace will be backed up.
+#
+# You can mix two types of entries:
+#
+#   project:<KEY>   — back up all repos belonging to a Bitbucket project
+#   <repo-slug>     — back up a single repository by its slug
+#
+# Examples:
+#   project:DEVOPS
+#   project:PLATFORM
+#   standalone-repo
+#   another-repo
+
