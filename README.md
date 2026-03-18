@@ -271,6 +271,97 @@ Restore is **idempotent**: groups and projects that already exist on the target 
 
 ---
 
+## Docker
+
+The tool ships as a lightweight Alpine-based Docker image (~128 MB). Source code and Python dependencies are baked into the image; credentials, repo filter, and backup data stay on the host via bind mounts.
+
+### Build
+
+```bash
+docker build -t bitbucket-backup .
+```
+
+### Run
+
+```bash
+# Backup
+docker run --rm \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/repos_filter.txt:/app/repos_filter.txt:ro \
+  -v $(pwd)/backups:/app/backups \
+  bitbucket-backup backup.py [--dry-run]
+
+# Restore
+docker run --rm \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/backups:/app/backups \
+  bitbucket-backup restore.py --backup-dir backups/2026-03-10T14-32-00 [--dry-run]
+```
+
+| Mount | Purpose |
+|---|---|
+| `-v $(pwd)/.env:/app/.env:ro` | Provides credentials and configuration. Mounted read-only (`:ro`) — the container never writes to it. |
+| `-v $(pwd)/repos_filter.txt:/app/repos_filter.txt:ro` | Optional repo filter file. Mounted read-only. Omit this mount to back up all repos. |
+| `-v $(pwd)/backups:/app/backups` | Maps the host backup directory into the container so snapshots persist after the container exits. |
+
+### Dockerfile explained
+
+```dockerfile
+# ── Stage 1: Install Python dependencies ──────────────────────────────────────
+FROM python:3.12-alpine AS builder
+```
+Multi-stage build. The first stage (`builder`) uses `python:3.12-alpine` as a throwaway environment solely to install pip packages. Alpine is chosen for minimal image size (~50 MB base vs ~350 MB for Debian-based images).
+
+```dockerfile
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+```
+Copies only `requirements.txt` first (not the full source) so Docker can cache this layer. `--prefix=/install` installs packages into an isolated directory that will be copied to the final image. `--no-cache-dir` prevents pip from storing download caches, keeping the layer smaller.
+
+```dockerfile
+# ── Stage 2: Final minimal image ──────────────────────────────────────────────
+FROM python:3.12-alpine
+```
+Starts a fresh `python:3.12-alpine` image. The builder stage and all its intermediate files (pip cache, build tools) are discarded — only the installed packages are carried over.
+
+```dockerfile
+RUN apk add --no-cache git
+```
+Installs the `git` CLI, required for `git clone --mirror` (backup) and `git push --mirror` (restore). `--no-cache` prevents the Alpine package index from being stored in the image.
+
+```dockerfile
+COPY --from=builder /install /usr/local
+```
+Copies the pre-built Python packages from the builder stage into the final image's system Python path. This is why multi-stage works: the final image never runs `pip install` and contains zero build artifacts.
+
+```dockerfile
+WORKDIR /app
+COPY backup.py restore.py ./
+```
+Copies only the two source files. `.dockerignore` excludes `.env`, `repos_filter.txt`, `backups/`, `.venv/`, `__pycache__/`, and docs from the build context so they never enter the image.
+
+```dockerfile
+VOLUME ["/app/backups"]
+```
+Declares `/app/backups` as a mount point. Without a bind mount, Docker creates an anonymous volume that persists data but is hard to find. The `docker run -v` flag maps it to a host directory.
+
+```dockerfile
+ENTRYPOINT ["python"]
+CMD ["backup.py"]
+```
+`ENTRYPOINT` sets `python` as the executable. `CMD` provides the default argument (`backup.py`), which can be overridden at run time to run `restore.py` instead. Combined: `docker run bitbucket-backup` runs `python backup.py`, while `docker run bitbucket-backup restore.py --backup-dir ...` runs the restore.
+
+### What stays outside the image
+
+| Item | Where | Why |
+|---|---|---|
+| `.env` | Host, bind-mounted at `/app/.env` | Contains secrets (tokens, passwords); must not be baked into an image layer |
+| `repos_filter.txt` | Host, bind-mounted at `/app/repos_filter.txt` | User-editable filter; may change between runs without rebuilding the image |
+| `backups/` | Host, bind-mounted at `/app/backups` | Snapshots must survive container removal; can be very large |
+
+---
+
 ## Known Limitations
 
 | Limitation | Behaviour |
@@ -287,5 +378,7 @@ Restore is **idempotent**: groups and projects that already exist on the target 
 ## Security
 
 - **`.env` is listed in `.gitignore`** and will not be committed. Keep it that way.
+- **`.env` is listed in `.dockerignore`** and will never be baked into a Docker image layer.
+- **`repos_filter.txt` is listed in `.dockerignore`** — it is bind-mounted at runtime, not embedded in the image.
 - App passwords and API tokens are used only for authentication; they appear in git clone URLs temporarily in memory but are never written to disk.
 - Webhook secrets and secured pipeline variables in the backup JSON are redacted before saving.

@@ -1,0 +1,9 @@
+.env
+.venv/
+backups/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.md
+repos_filter.txt
